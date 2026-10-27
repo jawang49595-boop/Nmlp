@@ -1,0 +1,2060 @@
+-- blox × สวนย่าง v18 (เมนูเดิม + วิ่งไว + ໂດດไม่จำกัด)
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local VIM = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
+local TweenService = game:GetService("TweenService")
+local UIS = game:GetService("UserInputService")
+local Debris = game:GetService("Debris")
+local LocalPlayer = Players.LocalPlayer
+
+local SELL_WAIT = 1.5
+local HOME_WAIT = 1
+
+-- ==================== ธีมสีฟ้า-ขาว (สไตล์ดั้งเดิม) ====================
+local C = {
+   white = Color3.fromRGB(255, 255, 255),
+   ice = Color3.fromRGB(238, 247, 255),
+   mist = Color3.fromRGB(218, 237, 255),
+   line = Color3.fromRGB(170, 212, 252),
+   sky2 = Color3.fromRGB(125, 208, 255),
+   sky = Color3.fromRGB(58, 158, 255),
+   deep = Color3.fromRGB(34, 110, 222),
+   ink = Color3.fromRGB(28, 82, 150),
+   red = Color3.fromRGB(255, 150, 150),
+   gray = Color3.fromRGB(100, 110, 125),
+}
+
+local function tw(inst, props, t, style, dir)
+   local tween = TweenService:Create(inst,
+      TweenInfo.new(t or 0.2, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props)
+   tween:Play()
+   return tween
+end
+
+local function mk(class, props, parent)
+   local o = Instance.new(class)
+   for k, v in pairs(props or {}) do o[k] = v end
+   if parent then o.Parent = parent end
+   return o
+end
+
+local function corner(parent, r)
+   return mk("UICorner", {CornerRadius = UDim.new(0, r)}, parent)
+end
+
+local function label(props, parent)
+   props.BackgroundTransparency = 1
+   props.Font = props.Font or Enum.Font.GothamBold
+   return mk("TextLabel", props, parent)
+end
+
+local gui = mk("ScreenGui", {
+   Name = "Rayfield",
+   ResetOnSpawn = false,
+   ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+   IgnoreGuiInset = true,
+   DisplayOrder = 999,
+})
+do
+   local okp = pcall(function()
+      gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+   end)
+   if not okp or not gui.Parent then
+      gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+   end
+end
+
+local hbConn, uisConn, jumpConn
+
+local toastToken = 0
+local toastFrame = mk("Frame", {
+   AnchorPoint = Vector2.new(0.5, 0),
+   Position = UDim2.new(0.5, 0, 0, -70),
+   Size = UDim2.new(0, 250, 0, 46),
+   BackgroundColor3 = C.white,
+   ZIndex = 50,
+}, gui)
+corner(toastFrame, 14)
+mk("UIStroke", {Color = C.sky2, Thickness = 1.5}, toastFrame)
+mk("UIGradient", {Color = ColorSequence.new(C.white, C.mist), Rotation = 90}, toastFrame)
+local toastTitle = label({
+   Position = UDim2.new(0, 12, 0, 5), Size = UDim2.new(1, -24, 0, 16),
+   TextSize = 12, TextColor3 = C.deep, TextXAlignment = Enum.TextXAlignment.Left,
+   TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 51, Text = "",
+}, toastFrame)
+local toastBody = label({
+   Position = UDim2.new(0, 12, 0, 22), Size = UDim2.new(1, -24, 0, 18),
+   TextSize = 11, TextColor3 = C.ink, Font = Enum.Font.Gotham,
+   TextXAlignment = Enum.TextXAlignment.Left,
+   TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 51, Text = "",
+}, toastFrame)
+
+local function toast(title, body, dur)
+   toastTitle.Text = tostring(title or "")
+   toastBody.Text = tostring(body or "")
+   toastToken = toastToken + 1
+   local my = toastToken
+   toastFrame.Position = UDim2.new(0.5, 0, 0, -70)
+   tw(toastFrame, {Position = UDim2.new(0.5, 0, 0, 14)}, 0.35, Enum.EasingStyle.Back)
+   task.delay(dur or 3, function()
+      if toastToken == my and toastFrame.Parent then
+         tw(toastFrame, {Position = UDim2.new(0.5, 0, 0, -70)}, 0.3)
+      end
+   end)
+end
+
+local Rayfield = {}
+function Rayfield:Notify(d) toast(d.Title, d.Content, d.Duration) end
+function Rayfield:Destroy()
+   if hbConn then hbConn:Disconnect() end
+   if uisConn then uisConn:Disconnect() end
+   if jumpConn then jumpConn:Disconnect() end
+   gui:Destroy()
+end
+
+local Remotes = RS:FindFirstChild("Remotes")
+local HarvestFruit = Remotes and Remotes:FindFirstChild("HarvestFruit")
+local CatchReady = Remotes and Remotes:FindFirstChild("CatchReady")
+
+-- ==================== ตั้งค่าระบบ ====================
+local S = {
+   running = true,
+   farmDurian = false,
+   teleport = true, returnHome = true,
+   sort = "หนักสุดก่อน", minW = 0, maxW = 0,
+   settle = 0.2, retries = 3, delay = 0.1,
+   stealDurian = false, stealRubber = false,
+   walkSpeed = 80, infiniteJump = false,
+   autoWater = false,
+   waterFly = 120, waterDelay = 1, waterPerRefill = 10, refillGap = 3,
+}
+
+local blocked = setmetatable({}, {__mode = "k"})
+local DiagInfo, WaterDiagInfo, WaterStatusInfo
+local counters = {}
+
+local function note(t, c)
+   pcall(function() Rayfield:Notify({Title = t, Content = c, Duration = 3}) end)
+end
+
+local function getChar()
+   local c = LocalPlayer.Character
+   if not c then return end
+   local r = c:FindFirstChild("HumanoidRootPart")
+   local h = c:FindFirstChildOfClass("Humanoid")
+   if r and h and h.Health > 0 then return c, r, h end
+end
+
+local _, spawnRoot = getChar()
+local spawnPos = spawnRoot and spawnRoot.Position
+
+local function hasWord(txt, words)
+   for _, w in ipairs(words) do
+      if txt:find(w, 1, true) then return true end
+   end
+   return false
+end
+
+local function cutText(s, n)
+   local okc, pos = pcall(utf8.offset, s, n + 1)
+   if okc and pos then return s:sub(1, pos - 1) end
+   return s
+end
+
+local function equip(tool)
+   local _, _, hum = getChar()
+   if hum and tool.Parent ~= LocalPlayer.Character then
+      hum:EquipTool(tool)
+      task.wait(0.25)
+   end
+end
+
+-- ==================== จัดการความเร็วเดินและกระโดดไม่จำกัด ====================
+task.spawn(function()
+   while S.running do
+      local _, _, hum = getChar()
+      if hum then
+         hum.WalkSpeed = S.walkSpeed
+      end
+      task.wait(0.3)
+   end
+end)
+
+jumpConn = UIS.JumpRequest:Connect(function()
+   if S.infiniteJump then
+      local _, _, hum = getChar()
+      if hum then
+         hum:ChangeState(Enum.HumanoidStateType.Jumping)
+      end
+   end
+end)
+
+-- ==================== กลางคืน / กลางวัน ====================
+local nightCache = {t = 0, v = false}
+local function isNight()
+   if tick() - nightCache.t < 1 then return nightCache.v end
+   local res
+   local pg = LocalPlayer:FindFirstChild("PlayerGui")
+   if pg then
+      for _, d in ipairs(pg:GetDescendants()) do
+         if d:IsA("TextLabel") and d.Text ~= "" and #d.Text < 60 then
+            local txt = d.Text
+            if txt:find("กลางคืนในอีก", 1, true) then
+               res = false
+               break
+            end
+            if txt:find("เช้าในอีก", 1, true) or txt:find("กลางวันในอีก", 1, true)
+               or txt:find("รุ่งเช้า", 1, true) or txt:find("ตะวันขึ้น", 1, true) then
+               res = true
+               break
+            end
+         end
+      end
+   end
+   if res == nil then
+      local t = Lighting.ClockTime
+      res = t >= 18 or t < 6
+   end
+   nightCache.t = tick()
+   nightCache.v = res
+   return res
+end
+
+-- ==================== จัดการไอเทม ====================
+local RUBBER_ITEM_WORDS = {"ขี้ยาง", "น้ำยาง", "ก้อนถ้วย", "ยางก้อน", "cup lump", "cuplump", "lump", "(เสีย)", "(ดิบ)"}
+local RUBBER_PROMPT_WORDS = {"rubber", "latex", "cup lump", "cuplump", "lump", "ขี้ยาง", "น้ำยาง", "ก้อนถ้วย", "ยางก้อน", "(เสีย)", "(ดิบ)", "ยาง", "กรีด"}
+local SEED_WORDS = {"seed", "เมล็ด", "พันธุ์", "sapling", "ต้นกล้า", "กล้า"}
+
+local function allTools()
+   local list = {}
+   for _, cont in ipairs({LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")}) do
+      if cont then
+         for _, t in ipairs(cont:GetChildren()) do
+            if t:IsA("Tool") then table.insert(list, t) end
+         end
+      end
+   end
+   return list
+end
+
+local function toolText(t)
+   local s = t.Name:lower()
+   local ok2, tip = pcall(function() return t.ToolTip end)
+   if ok2 and type(tip) == "string" then s = s .. " " .. tip:lower() end
+   for _, a in ipairs({"DisplayName", "ItemName", "Type", "ItemType", "Kind"}) do
+      local v = t:GetAttribute(a)
+      if type(v) == "string" then s = s .. " " .. v:lower() end
+   end
+   return s
+end
+
+local function hasWeight(s)
+   return s:find("%d%s*kg") ~= nil or s:find("%d%s*กก") ~= nil
+end
+
+local function isRubberTool(t)
+   local s = toolText(t)
+   if hasWord(s, SEED_WORDS) then return false end
+   return hasWord(s, RUBBER_ITEM_WORDS)
+end
+
+local function fruitTools()
+   local list = {}
+   for _, t in ipairs(allTools()) do
+      local s = toolText(t)
+      if hasWeight(s) and not isRubberTool(t) then table.insert(list, t) end
+   end
+   return list
+end
+
+local function rubberTools()
+   local list = {}
+   for _, t in ipairs(allTools()) do
+      if isRubberTool(t) then table.insert(list, t) end
+   end
+   return list
+end
+
+local function rubberAmount()
+   local total, found = 0, false
+   for _, t in ipairs(rubberTools()) do
+      found = true
+      local x = t.Name:match("[xX]%s*(%d+)") or t.Name:match("(%d+)%s*[xX]")
+      total = total + (tonumber(x) or 1)
+   end
+   if found then return total end
+   local function scanVals(inst)
+      for k, v in pairs(inst:GetAttributes()) do
+         if type(v) == "number" and hasWord(k:lower(), RUBBER_ITEM_WORDS) and not hasWord(k:lower(), SEED_WORDS) then
+            return v
+         end
+      end
+      for _, ch in ipairs(inst:GetChildren()) do
+         if (ch:IsA("IntValue") or ch:IsA("NumberValue"))
+            and hasWord(ch.Name:lower(), RUBBER_ITEM_WORDS) and not hasWord(ch.Name:lower(), SEED_WORDS) then
+            return ch.Value
+         end
+      end
+      return nil
+   end
+   local v = scanVals(LocalPlayer)
+   if v then return v end
+   for _, fn in ipairs({"leaderstats", "Data", "Stats", "PlayerData"}) do
+      local f = LocalPlayer:FindFirstChild(fn)
+      if f then
+         v = scanVals(f)
+         if v then return v end
+      end
+   end
+   return 0
+end
+
+local function amount(kind)
+   if kind == "durian" then return #fruitTools() end
+   return rubberAmount()
+end
+
+local function firstTool(kind)
+   if kind == "durian" then return fruitTools()[1] end
+   return rubberTools()[1]
+end
+
+local selling = {durian = false, rubber = false}
+local cycleBusy = false
+local waterStepping = false
+local waterWaiting = false
+
+local function sellActive(kind)
+   return selling[kind]
+end
+
+local function anySelling()
+   return selling.durian or selling.rubber
+end
+
+local function walkTo(tpos, standoff)
+   local _, root0, hum0 = getChar()
+   if not root0 then return false end
+   local oldSpeed = hum0.WalkSpeed
+   local reached = false
+   local t0 = tick()
+   local lastPos, lastT = root0.Position, tick()
+   while S.running and tick() - t0 < 25 do
+      local _, r, h = getChar()
+      if not r then break end
+      h.WalkSpeed = S.walkSpeed
+      local flat = Vector3.new(tpos.X - r.Position.X, 0, tpos.Z - r.Position.Z).Magnitude
+      if flat <= standoff + 1.5 then reached = true break end
+      h:MoveTo(tpos)
+      if tick() - lastT > 1 then
+         if (r.Position - lastPos).Magnitude < 1.5 then
+            if flat <= 8 then reached = true break end
+            h.Jump = true
+         end
+         lastPos, lastT = r.Position, tick()
+      end
+      task.wait(0.1)
+   end
+   local _, r, h = getChar()
+   if h then
+      h.WalkSpeed = oldSpeed
+      if r then h:MoveTo(r.Position) end
+   end
+   return reached
+end
+
+-- ==================== ระบบตรวจจับ ====================
+local function isMine(inst)
+   local node = inst
+   while node and node ~= workspace do
+      if node.Name == LocalPlayer.Name or node.Name == LocalPlayer.DisplayName then return true end
+      for _, a in ipairs({"Owner", "OwnerName", "OwnerId", "UserId"}) do
+         local v = node:GetAttribute(a)
+         if v ~= nil and (v == LocalPlayer.Name or v == LocalPlayer.DisplayName or v == LocalPlayer.UserId) then
+            return true
+         end
+      end
+      local ov = node:FindFirstChild("Owner")
+      if ov then
+         if ov:IsA("ObjectValue") and ov.Value == LocalPlayer then return true end
+         if ov:IsA("StringValue") and ov.Value == LocalPlayer.Name then return true end
+      end
+      node = node.Parent
+   end
+   return false
+end
+
+local function ownerOf(inst)
+   local node = inst
+   local plotName
+   while node and node ~= workspace do
+      for _, a in ipairs({"Owner", "OwnerName", "OwnerId", "UserId", "PlayerName"}) do
+         local v = node:GetAttribute(a)
+         if v ~= nil then
+            if type(v) == "number" then
+               local pl = Players:GetPlayerByUserId(v)
+               if pl then return pl.Name end
+            else
+               return tostring(v)
+            end
+         end
+      end
+      local ov = node:FindFirstChild("Owner")
+      if ov then
+         if ov:IsA("ObjectValue") and ov.Value then return ov.Value.Name end
+         if ov:IsA("StringValue") and ov.Value ~= "" then return ov.Value end
+         if ov:IsA("IntValue") or ov:IsA("NumberValue") then
+            local pl = Players:GetPlayerByUserId(ov.Value)
+            if pl then return pl.Name end
+         end
+      end
+      for _, pl in ipairs(Players:GetPlayers()) do
+         if node.Name == pl.Name or node.Name == pl.DisplayName then return pl.Name end
+      end
+      if not plotName and node.Name:lower():find("plot", 1, true) then plotName = node.Name end
+      node = node.Parent
+   end
+   return nil, plotName
+end
+
+local function amMine(d)
+   if isMine(d) then return true end
+   local owner = ownerOf(d)
+   return owner ~= nil and (owner == LocalPlayer.Name or owner == LocalPlayer.DisplayName)
+end
+
+local function promptPart(p)
+   local par = p.Parent
+   if par and par:IsA("BasePart") then return par end
+   if par and par:IsA("Attachment") and par.Parent and par.Parent:IsA("BasePart") then return par.Parent end
+   local m = p:FindFirstAncestorOfClass("Model")
+   return m and (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true))
+end
+
+local function adorneePos(ad)
+   if not ad then return nil end
+   if ad:IsA("BasePart") then return ad.Position end
+   if ad:IsA("Attachment") then return ad.WorldPosition end
+   if ad:IsA("Model") then return ad:GetPivot().Position end
+   return nil
+end
+
+local function ancestorText(inst, levels)
+   local parts = {}
+   local node = inst
+   for _ = 1, levels do
+      if not node or node == workspace then break end
+      table.insert(parts, node.Name)
+      node = node.Parent
+   end
+   return table.concat(parts, " "):lower()
+end
+
+local function groundBelow(pos)
+   local params = RaycastParams.new()
+   params.FilterType = Enum.RaycastFilterType.Exclude
+   params.FilterDescendantsInstances = {LocalPlayer.Character}
+   local hit = workspace:Raycast(pos + Vector3.new(0, 5, 0), Vector3.new(0, -200, 0), params)
+   return hit and hit.Position or pos
+end
+
+local function detectHome()
+   local cands = {}
+   for _, rootInst in ipairs({workspace, LocalPlayer:FindFirstChild("PlayerGui")}) do
+      if rootInst then
+         for _, d in ipairs(rootInst:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text:upper():match("^%s*HOME%s*$") then
+               local bb = d:FindFirstAncestorOfClass("BillboardGui")
+               if bb then
+                  local ad = bb.Adornee or bb.Parent
+                  local pos = adorneePos(ad)
+                  if pos then table.insert(cands, {pos = pos, mine = ad and isMine(ad)}) end
+               end
+            end
+         end
+      end
+   end
+   for _, c in ipairs(cands) do
+      if c.mine then return c.pos end
+   end
+   if #cands > 0 then
+      local ref = spawnPos
+      if not ref then
+         local _, r = getChar()
+         ref = r and r.Position
+      end
+      table.sort(cands, function(a, b)
+         if not ref then return false end
+         return (a.pos - ref).Magnitude < (b.pos - ref).Magnitude
+      end)
+      return cands[1].pos
+   end
+   return nil
+end
+
+local function triggerPrompt(d)
+   pcall(function()
+      d.HoldDuration = 0
+      d.MaxActivationDistance = 40
+      d.RequiresLineOfSight = false
+   end)
+   if fireproximityprompt then pcall(fireproximityprompt, d) end
+   pcall(function()
+      d:InputHoldBegin()
+      task.wait(0.1)
+      d:InputHoldEnd()
+   end)
+end
+
+local vehCache = setmetatable({}, {__mode = "k"})
+local function isVehicle(inst)
+   local c = vehCache[inst]
+   if c ~= nil then return c end
+   local res = false
+   local node = inst
+   for depth = 1, 8 do
+      if not node or node == workspace then break end
+      if node:IsA("VehicleSeat") or node:IsA("Seat") then res = true break end
+      local n = node.Name:lower()
+      if n == "car" or n == "bus" or n:find("^car[%s_%d]") or n:find("[%s_]car$")
+         or n:find("vehicle", 1, true) or n:find("truck", 1, true) or n:find("tractor", 1, true)
+         or n:find("seat", 1, true) or n:find("รถ", 1, true) then
+         res = true break
+      end
+      if node:IsA("Model") and depth <= 3 and node:FindFirstChildWhichIsA("VehicleSeat", true) then
+         res = true break
+      end
+      node = node.Parent
+   end
+   vehCache[inst] = res
+   return res
+end
+
+local npcCache = setmetatable({}, {__mode = "k"})
+local function isNpc(inst)
+   local c = npcCache[inst]
+   if c ~= nil then return c end
+   local res = false
+   local node = inst
+   for _ = 1, 6 do
+      if not node or node == workspace then break end
+      if node:IsA("Model") and node:FindFirstChildOfClass("Humanoid")
+         and not Players:GetPlayerFromCharacter(node) then
+         res = true break
+      end
+      node = node.Parent
+   end
+   npcCache[inst] = res
+   return res
+end
+
+local function parseKg(s)
+   if type(s) ~= "string" then return nil end
+   local n = s:match("([%d%.]+)%s*[kK][gG]") or s:match("([%d%.]+)%s*กก")
+   return n and tonumber(n) or nil
+end
+
+local function parsePrice(s)
+   if type(s) ~= "string" then return nil end
+   local n = s:match("%$%s*([%d,%.]+)")
+   if n then
+      n = n:gsub(",", "")
+      return tonumber(n)
+   end
+   return nil
+end
+
+local function numAttr(inst, keys)
+   for k, v in pairs(inst:GetAttributes()) do
+      if type(v) == "number" then
+         local kl = k:lower()
+         for _, key in ipairs(keys) do
+            if kl:find(key, 1, true) then return v end
+         end
+      end
+   end
+   for _, ch in ipairs(inst:GetChildren()) do
+      if ch:IsA("NumberValue") then
+         local n = ch.Name:lower()
+         for _, key in ipairs(keys) do
+            if n:find(key, 1, true) then return ch.Value end
+         end
+      end
+   end
+   return nil
+end
+
+local infoCache = setmetatable({}, {__mode = "k"})
+local function scanText(s, info)
+   if type(s) ~= "string" then return end
+   if not info.w then info.w = parseKg(s) end
+   if not info.v then info.v = parsePrice(s) end
+end
+
+local function getInfo(p)
+   local c = infoCache[p]
+   if c and ((c.w and c.v) or tick() - c.t < 5) then return c end
+   local info = {t = tick()}
+   scanText(p.ObjectText, info)
+   scanText(p.ActionText, info)
+   scanText(p.Name, info)
+   local node = p
+   for depth = 1, 4 do
+      if info.w and info.v then break end
+      node = node and node.Parent
+      if not node or node == workspace then break end
+      if not info.w then info.w = numAttr(node, {"weight", "kg", "mass"}) end
+      if not info.v then info.v = numAttr(node, {"value", "price", "worth", "cost"}) end
+      for _, v in pairs(node:GetAttributes()) do
+         if type(v) == "string" then scanText(v, info) end
+      end
+      for _, ch in ipairs(node:GetChildren()) do
+         if ch:IsA("TextLabel") or ch:IsA("TextButton") then scanText(ch.Text, info) end
+      end
+      if depth <= 1 then
+         local n = 0
+         for _, d in ipairs(node:GetDescendants()) do
+            n = n + 1
+            if n > 80 then break end
+            if d:IsA("TextLabel") then scanText(d.Text, info) end
+         end
+      end
+   end
+   infoCache[p] = info
+   return info
+end
+
+local FULL_WORDS = {"เต็ม", "full", "100%", "พร้อมเก็บ", "ready"}
+local NOT_FULL_WORDS = {"ไม่เต็ม", "ยังไม่", "not full", "notfull", "not ready", "empty", "ถ้วยว่าง", "growing"}
+local CUR_KEYS = {"latex", "amount", "fill", "current", "น้ำยาง", "stored"}
+local MAX_KEYS = {"max", "capacity", "cap", "limit"}
+
+local function cupStatus(p)
+   local texts, flags = {}, {}
+   local cur, mx, pct
+   local function addText(s)
+      if type(s) == "string" and s ~= "" and #s < 80 then table.insert(texts, s:lower()) end
+   end
+   local function handle(k, v)
+      local kl = tostring(k):lower()
+      if type(v) == "string" then
+         addText(v)
+      elseif type(v) == "boolean" then
+         if kl:find("full", 1, true) or kl:find("ready", 1, true) or kl:find("เต็ม", 1, true) then
+            table.insert(flags, v)
+         end
+      elseif type(v) == "number" then
+         if hasWord(kl, MAX_KEYS) then
+            mx = mx or v
+         elseif kl:find("percent", 1, true) then
+            pct = pct or v
+         elseif hasWord(kl, CUR_KEYS) then
+            cur = cur or v
+         end
+      end
+   end
+   addText(p.ActionText)
+   addText(p.ObjectText)
+   addText(p.Name)
+   local node = p
+   for depth = 1, 4 do
+      node = node and node.Parent
+      if not node or node == workspace then break end
+      addText(node.Name)
+      for k, v in pairs(node:GetAttributes()) do handle(k, v) end
+      for _, ch in ipairs(node:GetChildren()) do
+         if ch:IsA("BoolValue") or ch:IsA("NumberValue") or ch:IsA("IntValue") or ch:IsA("StringValue") then
+            handle(ch.Name, ch.Value)
+         elseif ch:IsA("TextLabel") then
+            addText(ch.Text)
+         end
+      end
+      if depth <= 2 then
+         local n = 0
+         for _, d in ipairs(node:GetDescendants()) do
+            n = n + 1
+            if n > 80 then break end
+            if d:IsA("TextLabel") then addText(d.Text) end
+         end
+      end
+   end
+   local blob = table.concat(texts, " | ")
+   local summary = blob:sub(1, 90)
+   if hasWord(blob, NOT_FULL_WORDS) then return false, summary, true end
+   for _, f in ipairs(flags) do
+      if f == false then return false, summary, true end
+   end
+   for _, f in ipairs(flags) do
+      if f == true then return true, summary end
+   end
+   for _, t in ipairs(texts) do
+      local a, b = t:match("(%d+)%s*/%s*(%d+)")
+      if a and b and tonumber(b) > 0 then
+         if tonumber(a) >= tonumber(b) then return true, summary end
+         return false, summary, true
+      end
+   end
+   if pct then
+      if pct >= 100 then return true, summary end
+      return false, summary, true
+   end
+   if cur and mx and mx > 0 then
+      if cur >= mx then return true, summary end
+      return false, summary, true
+   end
+   if hasWord(blob, FULL_WORDS) then return true, summary end
+   return false, summary
+end
+
+local DURIAN_KEYS = {"durian", "fruit", "harvest", "collect", "pick", "kradum", "thong", "ทุเรียน", "เก็บ"}
+local DURIAN_STRONG = {"durian", "kradum", "thong", "ทุเรียน"}
+local EXCL = {"plot", "shop", "sell", "buy", "ซื้อ", "คุย", "talk", "ขาย", "rebirth", "job", "market",
+   "drive", "ride", "seat", "sit", "vehicle", "board", "enter", "ขับ", "นั่ง", "ขึ้น", "รถ",
+   "ปลูก", "กล้า", "sapling", "seed", "เมล็ด", "plant"}
+
+local STIR_WORDS = {"คน", "กวน", "stir", "mix"}
+local function promptIsStir(p)
+   local own = (p.ActionText .. " " .. p.ObjectText .. " " .. p.Name):lower()
+   if own:find("คนอื่น", 1, true) then return false end
+   return hasWord(own, STIR_WORDS)
+end
+
+local function classify(p)
+   local own = (p.Name .. " " .. p.ActionText .. " " .. p.ObjectText):lower()
+   if hasWord(own, EXCL) then return nil end
+   local text = own
+   local par = p.Parent
+   for _ = 1, 3 do
+      if par and par ~= workspace then
+         text = text .. " " .. par.Name:lower()
+         par = par.Parent
+      end
+   end
+   local rub = hasWord(text, RUBBER_PROMPT_WORDS) or promptIsStir(p)
+   local durStrong = hasWord(text, DURIAN_STRONG)
+   local kind
+   if rub and not durStrong then
+      kind = "rubber"
+   else
+      if hasWord(text, DURIAN_KEYS) and not (rub and not durStrong) then
+         kind = "durian"
+      end
+   end
+   if not kind then return nil end
+   if isVehicle(p) or isNpc(p) then return nil end
+   return kind
+end
+
+local function collectTargets(kind, wantMine)
+   local _, root = getChar()
+   local list = {}
+   local filterW = (kind == "durian" and wantMine) and (S.minW > 0 or S.maxW > 0)
+   for _, d in ipairs(workspace:GetDescendants()) do
+      if d:IsA("ProximityPrompt") and d.Enabled and not (blocked[d] and blocked[d] > tick())
+         and classify(d) == kind and amMine(d) == wantMine then
+         local info = getInfo(d)
+         local w = info.w
+         local pass = true
+         if filterW then
+            if not w then
+               pass = false
+            else
+               if S.minW > 0 and w < S.minW then pass = false end
+               if S.maxW > 0 and w > S.maxW then pass = false end
+            end
+         end
+         if pass and kind == "rubber" and not wantMine then
+            if promptIsStir(d) or not cupStatus(d) then pass = false end
+         end
+         local part = promptPart(d)
+         if pass and part then
+            local dist = root and (root.Position - part.Position).Magnitude or 0
+            table.insert(list, {p = d, w = w or 0, v = info.v or w or 0, dist = dist})
+         end
+      end
+   end
+   return list
+end
+
+local function harvestOne(p)
+   local _, root = getChar()
+   local part = promptPart(p)
+   if not (root and part) then return false end
+   local oldHold, oldDist = p.HoldDuration, p.MaxActivationDistance
+   pcall(function()
+      p.HoldDuration = 0
+      p.MaxActivationDistance = 60
+      p.RequiresLineOfSight = false
+   end)
+   for _ = 1, S.retries do
+      if not p.Parent or not p.Enabled then return true end
+      local _, r = getChar()
+      if not r then return false end
+      if S.teleport then
+         r.CFrame = part.CFrame * CFrame.new(0, 3, 0)
+         r.AssemblyLinearVelocity = Vector3.zero
+      end
+      task.wait(S.settle)
+      if fireproximityprompt then pcall(fireproximityprompt, p) end
+      if HarvestFruit then pcall(function() HarvestFruit:FireServer(p) end) end
+      if CatchReady then pcall(function() CatchReady:FireServer() end) end
+      task.wait(0.15)
+      if not p.Parent or not p.Enabled or not part.Parent then return true end
+   end
+   pcall(function()
+      p.HoldDuration = oldHold
+      p.MaxActivationDistance = oldDist
+   end)
+   return false
+end
+
+local function harvestCycle(kind)
+   local _, root = getChar()
+   if not root then return end
+   local home = root.CFrame
+   local did = false
+   local list = collectTargets(kind, true)
+   table.sort(list, function(a, b)
+      if S.sort == "หนักสุดก่อน" then
+         if a.w ~= b.w then return a.w > b.w end
+      elseif S.sort == "เบาสุดก่อน" then
+         if a.w ~= b.w then return a.w < b.w end
+      end
+      return a.dist < b.dist
+   end)
+   for _, it in ipairs(list) do
+      if not (S.running and S.farmDurian) then break end
+      if anySelling() or waterWaiting then break end
+      if it.p.Parent and it.p.Enabled then
+         if harvestOne(it.p) then
+            did = true
+         else
+            blocked[it.p] = tick() + 15
+         end
+         task.wait(S.delay)
+      end
+   end
+   local _, r2 = getChar()
+   if did and S.teleport and S.returnHome and r2 and not anySelling() and not waterWaiting then
+      r2.CFrame = home
+   end
+end
+
+local function stealOn(kind)
+   if kind == "durian" then return S.stealDurian end
+   return S.stealRubber
+end
+
+local function stealOne(p)
+   local part = promptPart(p)
+   if not part then return false end
+   pcall(function()
+      p.HoldDuration = 0
+      p.MaxActivationDistance = 60
+      p.RequiresLineOfSight = false
+   end)
+   -- ใช้วิธีเดินหรือวาร์ปแทนการบิน
+   local _, r = getChar()
+   if r then
+      r.CFrame = part.CFrame * CFrame.new(0, 3, 0)
+   end
+   for _ = 1, S.retries do
+      if not p.Parent or not p.Enabled then return true end
+      task.wait(S.settle)
+      if fireproximityprompt then pcall(fireproximityprompt, p) end
+      if HarvestFruit then pcall(function() HarvestFruit:FireServer(p) end) end
+      if CatchReady then pcall(function() CatchReady:FireServer() end) end
+      task.wait(0.2)
+      if not p.Parent or not p.Enabled or not part.Parent then return true end
+   end
+   return false
+end
+
+local function goHome(pos)
+   local _, r = getChar()
+   if r then r.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0)) end
+   task.wait(HOME_WAIT)
+   if CatchReady then pcall(function() CatchReady:FireServer() end) end
+end
+
+local function stealCycle(kind)
+   if not isNight() then return end
+   local _, root = getChar()
+   if not root then return end
+   local list = collectTargets(kind, false)
+   if #list == 0 then return end
+   table.sort(list, function(a, b)
+      if a.v ~= b.v then return a.v > b.v end
+      return a.dist < b.dist
+   end)
+   local home = groundBelow(detectHome() or spawnPos or root.Position)
+   for _, f in ipairs(list) do
+      if not (S.running and stealOn(kind)) then break end
+      if not isNight() then break end
+      if anySelling() then break end
+      if f.p.Parent and f.p.Enabled then
+         if kind == "rubber" and not cupStatus(f.p) then
+            blocked[f.p] = tick() + 5
+         elseif stealOne(f.p) then
+            goHome(home)
+         else
+            blocked[f.p] = tick() + 20
+         end
+      end
+   end
+end
+
+local SELLERS = {
+   durian = {label = "ทุเรียน", itemWords = {"durian", "ทุเรียน", "kradum", "fruit"}},
+   rubber = {label = "ขี้ยาง", itemWords = {"ขี้ยาง", "น้ำยาง", "ก้อนถ้วย", "cup lump", "cuplump", "lump", "latex"}},
+}
+local BUY_WORDS = {"sell", "ขาย", "รับซื้อ", "ซื้อ", "คุย", "talk", "merchant", "buyer", "trader", "vendor", "พ่อค้า", "แม่ค้า", "market"}
+local SKIP_WORDS = {"plot", "rebirth", "job", "ride", "drive", "sit", "seat", "enter", "board", "ขับ", "นั่ง", "หางาน"}
+
+local function otherKind(k)
+   if k == "durian" then return "rubber" end
+   return "durian"
+end
+
+local function sellerScore(blob, kind)
+   local mineHit = hasWord(blob, SELLERS[kind].itemWords)
+   local othHit = hasWord(blob, SELLERS[otherKind(kind)].itemWords)
+   local s = 0
+   if mineHit then s = s + 2 end
+   if hasWord(blob, BUY_WORDS) then s = s + 2 end
+   if mineHit and blob:find("รับซื้อ", 1, true) then s = s + 2 end
+   if othHit and not mineHit then s = s - 3 end
+   return s
+end
+
+local sellerCache = {}
+local function findSeller(kind, force)
+   local c = sellerCache[kind]
+   if c and not force and tick() - c.t < 20 then return c.pos, c.src end
+   local _, root = getChar()
+   local best, bs, bd, bsrc
+   local function consider(pos, blob, src)
+      if not pos then return end
+      if hasWord(blob, SEED_WORDS) then return end
+      if not hasWord(blob, BUY_WORDS) then return end
+      local s = sellerScore(blob, kind)
+      if s < 2 then return end
+      local d = root and (pos - root.Position).Magnitude or 0
+      if not bs or s > bs or (s == bs and d < bd) then best, bs, bd, bsrc = pos, s, d, src end
+   end
+   for _, d in ipairs(workspace:GetDescendants()) do
+      if d:IsA("ProximityPrompt") then
+         if not classify(d) then
+            local blob = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Name):lower() .. " " .. ancestorText(d.Parent, 6)
+            local part = promptPart(d)
+            consider(part and part.Position, blob, "พรอมต์ '" .. d.ActionText .. "' ที่ " .. (d.Parent and d.Parent.Name or "?"))
+         end
+      elseif d:IsA("Model") then
+         if d:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(d) then
+            consider(d:GetPivot().Position, d.Name:lower() .. " " .. ancestorText(d.Parent, 2), "NPC " .. d.Name)
+         end
+      elseif d:IsA("TextLabel") and d.Text ~= "" and #d.Text < 40 then
+         local bb = d:FindFirstAncestorOfClass("BillboardGui")
+         if bb then
+            consider(adorneePos(bb.Adornee or bb.Parent), d.Text:lower() .. " " .. ancestorText(bb.Parent, 3), "ป้าย '" .. d.Text .. "'")
+         end
+      end
+   end
+   if best then sellerCache[kind] = {pos = best, src = bsrc, t = tick()} end
+   return best, bsrc
+end
+
+local function nearestSellPrompt(pos, radius)
+   local best, bd
+   for _, d in ipairs(workspace:GetDescendants()) do
+      if d:IsA("ProximityPrompt") and d.Enabled and not classify(d) then
+         local part = promptPart(d)
+         if part then
+            local dist = (part.Position - pos).Magnitude
+            if dist <= radius then
+               local own = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Name):lower()
+               local all = own .. " " .. ancestorText(d.Parent, 6)
+               if not hasWord(own, SKIP_WORDS) and not hasWord(all, SEED_WORDS) then
+                  if not bd or dist < bd then best, bd = d, dist end
+               end
+            end
+         end
+      end
+   end
+   return best
+end
+
+local BTN_ALL = {"sell all", "sell everything", "sell inventory", "ขายทั้งหมด", "ขายหมด"}
+local BTN_ANY = {"sell", "ขาย"}
+
+local function isShown(g)
+   local node = g
+   while node and node ~= game do
+      if node:IsA("GuiObject") and not node.Visible then return false end
+      if node:IsA("ScreenGui") and not node.Enabled then return false end
+      node = node.Parent
+   end
+   return true
+end
+
+local function tooFar()
+   local pg = LocalPlayer:FindFirstChild("PlayerGui")
+   if not pg then return false end
+   for _, d in ipairs(pg:GetDescendants()) do
+      if d:IsA("TextLabel") and d.Text ~= "" and #d.Text < 90 and d.TextTransparency < 0.9
+         and not d:FindFirstAncestor("Rayfield") then
+         local t = d.Text
+         if t:find("ใกล้อีก", 1, true) or t:find("เข้ามาใกล้", 1, true) or t:find("ขยับเข้า", 1, true) then
+            if isShown(d) then return true end
+         end
+      end
+   end
+   return false
+end
+
+local function buttonText(b)
+   local s = ""
+   if b:IsA("TextButton") then s = b.Text end
+   local n = 0
+   for _, d in ipairs(b:GetDescendants()) do
+      n = n + 1
+      if n > 10 then break end
+      if d:IsA("TextLabel") or d:IsA("TextButton") then s = s .. " " .. d.Text end
+   end
+   return s:lower()
+end
+
+local function rankButtons(kind)
+   local pg = LocalPlayer:FindFirstChild("PlayerGui")
+   local b1, b2, b3 = {}, {}, {}
+   if not pg then return b1 end
+   local mineW = SELLERS[kind].itemWords
+   local othW = SELLERS[otherKind(kind)].itemWords
+   for _, b in ipairs(pg:GetDescendants()) do
+      if b:IsA("GuiButton") and not b:FindFirstAncestor("Rayfield") and isShown(b)
+         and b.AbsoluteSize.X > 0 and b.AbsoluteSize.Y > 0 then
+         local txt = buttonText(b)
+         if hasWord(txt, BTN_ANY) and not hasWord(txt, SEED_WORDS) then
+            local oth = hasWord(txt, othW)
+            if hasWord(txt, mineW) and not oth then
+               table.insert(b1, b)
+            elseif hasWord(txt, BTN_ALL) and not oth then
+               table.insert(b2, b)
+            elseif not oth then
+               table.insert(b3, b)
+            end
+         end
+      end
+   end
+   for _, b in ipairs(b2) do table.insert(b1, b) end
+   for _, b in ipairs(b3) do table.insert(b1, b) end
+   return b1
+end
+
+local function pressButton(b)
+   if getconnections then
+      for _, sig in ipairs({b.MouseButton1Click, b.Activated, b.MouseButton1Down, b.MouseButton1Up}) do
+         pcall(function()
+            for _, c in ipairs(getconnections(sig)) do c:Fire() end
+         end)
+      end
+   end
+   if firesignal then
+      pcall(firesignal, b.MouseButton1Click)
+      pcall(firesignal, b.Activated)
+   end
+   pcall(function()
+      local ap, as = b.AbsolutePosition, b.AbsoluteSize
+      local sg = b:FindFirstAncestorOfClass("ScreenGui")
+      local dy = (sg and not sg.IgnoreGuiInset) and GuiService:GetGuiInset().Y or 0
+      local x, y = ap.X + as.X / 2, ap.Y + as.Y / 2 + dy
+      VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+      task.wait(0.05)
+      VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+      VIM:SendTouchEvent(1, 0, x, y)
+      task.wait(0.05)
+      VIM:SendTouchEvent(1, 2, x, y)
+   end)
+end
+
+local function sellPromptsNear(kind, radius)
+   local _, root = getChar()
+   if not root then return end
+   for _, d in ipairs(workspace:GetDescendants()) do
+      if d:IsA("ProximityPrompt") and not classify(d) then
+         local part = promptPart(d)
+         if part and (part.Position - root.Position).Magnitude < radius then
+            local own = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Name):lower()
+            if not hasWord(own, SKIP_WORDS)
+               and not hasWord(own .. " " .. ancestorText(d.Parent, 6), SEED_WORDS) then
+               local blob = own .. " " .. ancestorText(d.Parent, 6)
+               if sellerScore(blob, kind) >= 2 or hasWord(own, BTN_ANY) then
+                  triggerPrompt(d)
+               end
+            end
+         end
+      end
+   end
+end
+
+local function have(kind)
+   return amount(kind) or 0
+end
+
+local sellTarget = {durian = nil, rubber = nil}
+
+local function sellByPrompt(kind, cnt)
+   local tp = sellTarget[kind]
+   if tp and tp.Parent then
+      triggerPrompt(tp)
+      task.wait(0.6)
+      if have(kind) < cnt then return true end
+   end
+   sellPromptsNear(kind, 15)
+   task.wait(0.8)
+   return have(kind) < cnt
+end
+
+local function sellByGui(kind, cnt)
+   local t0 = tick()
+   local tried = {}
+   while tick() - t0 < 2.5 do
+      for _, b in ipairs(rankButtons(kind)) do
+         if not tried[b] then
+            tried[b] = true
+            pressButton(b)
+            task.wait(0.7)
+            if have(kind) < cnt then return true end
+         end
+      end
+      task.wait(0.3)
+   end
+   return false
+end
+
+local sellMemo = {}
+local function sellByRemote(kind, cnt)
+   local mineW = SELLERS[kind].itemWords
+   local othW = SELLERS[otherKind(kind)].itemWords
+   local specific, generic = {}, {}
+   for _, r in ipairs(Remotes:GetDescendants()) do
+      if (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then
+         local n = r.Name:lower()
+         if n:find("sell", 1, true) and not hasWord(n, othW) then
+            if hasWord(n, mineW) then table.insert(specific, r) else table.insert(generic, r) end
+         end
+      end
+   end
+   local list = {}
+   for _, r in ipairs(specific) do table.insert(list, r) end
+   for _, r in ipairs(generic) do table.insert(list, r) end
+   if #list == 0 then return false end
+   local tool = firstTool(kind)
+   local pats = {{}, {"All"}, {"all"}, {true}}
+   if kind == "durian" then
+      table.insert(pats, {"Durian"})
+      table.insert(pats, {"Fruit"})
+   else
+      table.insert(pats, {"Rubber"})
+      table.insert(pats, {"Latex"})
+   end
+   if tool then table.insert(pats, {tool}) end
+   local function attempt(r, i)
+      local args = pats[i]
+      if r:IsA("RemoteFunction") then
+         task.spawn(function() pcall(function() r:InvokeServer(unpack(args)) end) end)
+      else
+         pcall(function() r:FireServer(unpack(args)) end)
+      end
+      task.wait(0.6)
+      if have(kind) < cnt then
+         sellMemo[kind] = {r = r, i = i}
+         return true
+      end
+      return false
+   end
+   local m = sellMemo[kind]
+   if m and m.r.Parent and pats[m.i] and attempt(m.r, m.i) then return true end
+   for _, r in ipairs(list) do
+      for i = 1, #pats do
+         if attempt(r, i) then return true end
+      end
+   end
+   return false
+end
+
+local strategies = {sellByPrompt, sellByGui, sellByRemote}
+local strategyNames = {"พรอมต์ที่พ่อค้า", "ปุ่มขายบนหน้าจอ", "Remote ขาย"}
+local preferred = {durian = 1, rubber = 1}
+
+local function trySell(kind, cnt)
+   for k = 0, #strategies - 1 do
+      local i = ((preferred[kind] - 1 + k) % #strategies) + 1
+      if strategies[i](kind, cnt) then
+         preferred[kind] = i
+         return strategyNames[i]
+      end
+   end
+   return nil
+end
+
+local standoffs = {3, 2, 1, 0.5}
+
+local function sellPass(kind)
+   local lb = SELLERS[kind].label
+   local before = amount(kind)
+   if before == nil or before == 0 then
+      note("ขาย" .. lb, "ไม่มี" .. lb .. "ในตัว")
+      return
+   end
+   local pos = findSeller(kind, true)
+   if not pos then
+      note("ขาย" .. lb, "ไม่พบพ่อค้า" .. lb)
+      return
+   end
+   local pr = nearestSellPrompt(pos, 20)
+   sellTarget[kind] = pr
+   local prPart = pr and promptPart(pr)
+   local tpos = prPart and prPart.Position or pos
+   note("ขาย" .. lb, "กำลังเดินไปขาย " .. before .. " ชิ้น")
+
+   local used
+   for round = 1, #standoffs do
+      if not (S.running and sellActive(kind)) then break end
+      walkTo(tpos, standoffs[round])
+      task.wait(round == 1 and SELL_WAIT or 0.8)
+
+      for _ = 1, 15 do
+         if not (S.running and sellActive(kind)) then break end
+         local cnt = have(kind)
+         if cnt == 0 then break end
+         if tooFar() then break end
+         local ft = firstTool(kind)
+         if ft then equip(ft) end
+         local how = trySell(kind, cnt)
+         if not how then break end
+         used = how
+      end
+
+      if have(kind) == 0 then break end
+   end
+
+   if used then
+      note("ขาย" .. lb, "ขายแล้ว ด้วย: " .. used)
+   elseif have(kind) > 0 then
+      note("ขาย" .. lb, "ขายไม่สำเร็จ ลองกดใหม่อีกครั้ง")
+   end
+end
+
+local function startSell(kind)
+   if selling[kind] then
+      note("ขาย" .. SELLERS[kind].label, "กำลังขายอยู่ รอสักครู่")
+      return
+   end
+   selling[kind] = true
+   task.spawn(function()
+      local t0 = tick()
+      while (cycleBusy or waterStepping) and tick() - t0 < 10 do task.wait(0.1) end
+      local okc, err = pcall(sellPass, kind)
+      if not okc then warn("sell error:", err) end
+      local _, r = getChar()
+      if r then pcall(function() r.Anchored = false end) end
+      selling[kind] = false
+   end)
+end
+
+-- ==================== ระบบรดน้ำ ====================
+local WATER_WORDS = {"รดน้ำ", "water", "thirst", "moisture", "ความชื้น", "ขาดน้ำ", "ต้องการน้ำ", "แห้ง", "💧"}
+local WATER_ACTION = {"รดน้ำ", "water"}
+local NEED_WORDS = {"ต้องการน้ำ", "ขาดน้ำ", "แห้ง", "needs water", "need water", "thirsty", "dry", "wilt", "เหี่ยว"}
+local DONE_WORDS = {"รดแล้ว", "ชุ่มน้ำ", "ไม่ต้องการน้ำ", "watered", "hydrated", "ชุ่มชื้น"}
+local WATER_KEYS = {"water", "thirst", "moist", "ความชื้น", "น้ำ"}
+local NOT_WATER = {"ยาง", "latex", "rubber"}
+local TREE_WORDS = {"tree", "plant", "crop", "sapling", "durian", "rubber", "ต้น", "ทุเรียน", "ยาง"}
+local WELL_WORDS = {"เติมน้ำ", "ตักน้ำ", "refill", "fill", "well", "บ่อน้ำ", "บ่อ", "pump", "ปั๊มน้ำ", "fountain"}
+local WELL_ACTION = {"เติมน้ำ", "ตักน้ำ", "refill", "fill"}
+local WATER_TOOL_WORDS = {"บัว", "รดน้ำ", "watering", "water", "กระป๋องน้ำ"}
+local REFILL_BTN = {"เติมน้ำ", "refill", "ตักน้ำ", "fill"}
+local EMPTY_WORDS = {"น้ำหมด", "ไม่มีน้ำ", "น้ำไม่พอ", "เติมน้ำก่อน", "กระป๋องว่าง", "out of water", "no water", "need to refill"}
+
+local waterCount = 0
+local lastRefillT = 0
+local plantBlock = setmetatable({}, {__mode = "k"})
+
+local waterStatus = "ปิดอยู่"
+local function setWaterStatus(t)
+   if t == waterStatus then return end
+   waterStatus = t
+   if WaterStatusInfo then
+      pcall(function() WaterStatusInfo:Set({Title = "💦 สถานะรดน้ำ", Content = t}) end)
+   end
+end
+
+local function plantEval(plant)
+   local texts, bools = {}, {}
+   local cur, mx, pct
+   local hasPrompt, promptOn = false, false
+   local function addText(s)
+      if type(s) == "string" and s ~= "" and #s < 80 then table.insert(texts, s:lower()) end
+   end
+   local function handle(k, v)
+      local kl = tostring(k):lower()
+      if hasWord(kl, NOT_WATER) then return end
+      if type(v) == "string" then
+         addText(v)
+      elseif type(v) == "boolean" then
+         if kl:find("needwater", 1, true) or kl:find("thirst", 1, true) or kl:find("dry", 1, true) then
+            table.insert(bools, v)
+         elseif kl:find("watered", 1, true) or kl:find("hydrat", 1, true) then
+            table.insert(bools, not v)
+         end
+      elseif type(v) == "number" and hasWord(kl, WATER_KEYS) then
+         if hasWord(kl, MAX_KEYS) then
+            mx = mx or v
+         elseif kl:find("percent", 1, true) then
+            pct = pct or v
+         else
+            cur = cur or v
+         end
+      end
+   end
+   for k, v in pairs(plant:GetAttributes()) do handle(k, v) end
+   local n = 0
+   for _, d in ipairs(plant:GetDescendants()) do
+      n = n + 1
+      if n > 150 then break end
+      if d:IsA("TextLabel") then
+         addText(d.Text)
+      elseif d:IsA("ProximityPrompt") then
+         local pt = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Name):lower()
+         if hasWord(pt, WATER_ACTION) and not hasWord(pt, RUBBER_ITEM_WORDS) then
+            hasPrompt = true
+            if d.Enabled then promptOn = true end
+         end
+      elseif d:IsA("BoolValue") or d:IsA("NumberValue") or d:IsA("IntValue") or d:IsA("StringValue") then
+         handle(d.Name, d.Value)
+      end
+   end
+   local blob = table.concat(texts, " | ")
+   local summary = cutText(blob, 40)
+   local need
+   if hasWord(blob, DONE_WORDS) then
+      need = false
+   else
+      local anyTrue, anyFalse = false, false
+      for _, b in ipairs(bools) do
+         if b then anyTrue = true else anyFalse = true end
+      end
+      if anyTrue then
+         need = true
+      elseif anyFalse then
+         need = false
+      elseif pct then
+         need = pct < 100
+      elseif cur and mx and mx > 0 then
+         need = cur < mx
+      elseif hasWord(blob, NEED_WORDS) then
+         need = true
+      elseif hasPrompt then
+         need = promptOn
+      end
+   end
+   return need, summary
+end
+
+local function scanPlants()
+   local _, root = getChar()
+   local found, order = {}, {}
+   local function add(plant)
+      if not plant or found[plant] then return end
+      if Players:GetPlayerFromCharacter(plant) then return end
+      if isNpc(plant) or isVehicle(plant) then return end
+      if not amMine(plant) then return end
+      found[plant] = true
+      table.insert(order, plant)
+   end
+   local function plantOf(inst)
+      local node = inst
+      local first
+      for _ = 1, 8 do
+         node = node and node.Parent
+         if not node or node == workspace then break end
+         if node:IsA("Model") then
+            first = first or node
+            if hasWord(node.Name:lower(), TREE_WORDS) then return node end
+         end
+      end
+      return first
+   end
+   for _, d in ipairs(workspace:GetDescendants()) do
+      if d:IsA("ProximityPrompt") then
+         local pt = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Name):lower()
+         if hasWord(pt, WATER_ACTION) and not hasWord(pt, RUBBER_ITEM_WORDS) and not hasWord(pt, WELL_WORDS) then
+            add(plantOf(d))
+         end
+      elseif d:IsA("Model") then
+         for k in pairs(d:GetAttributes()) do
+            local kl = k:lower()
+            if hasWord(kl, WATER_KEYS) and not hasWord(kl, NOT_WATER) then
+               add(d)
+               break
+            end
+         end
+      elseif d:IsA("TextLabel") and d.Text ~= "" and #d.Text < 60 then
+         if d:FindFirstAncestorOfClass("BillboardGui") or d:FindFirstAncestorOfClass("SurfaceGui") then
+            local tl = d.Text:lower()
+            if hasWord(tl, WATER_WORDS) and not hasWord(tl, RUBBER_ITEM_WORDS) then add(plantOf(d)) end
+         end
+      end
+   end
+   local rows = {}
+   for _, pl in ipairs(order) do
+      local anc, dup = pl.Parent, false
+      while anc and anc ~= workspace do
+         if found[anc] then dup = true break end
+         anc = anc.Parent
+      end
+      if not dup then
+         local need, sm = plantEval(pl)
+         local pv = pl:GetPivot().Position
+         table.insert(rows, {pl = pl, need = need, sm = sm, dist = root and (root.Position - pv).Magnitude or 0})
+      end
+   end
+   table.sort(rows, function(a, b) return a.dist < b.dist end)
+   return rows
+end
+
+local function findThirsty()
+   local okc, rows = pcall(scanPlants)
+   local targets = {}
+   if not okc or not rows then return targets end
+   for _, r in ipairs(rows) do
+      if r.need == true and not (plantBlock[r.pl] and plantBlock[r.pl] > tick()) then
+         table.insert(targets, r)
+      end
+   end
+   return targets
+end
+
+local function plantStandPos(plant)
+   local pv = plant:GetPivot().Position
+   local okb, cf, size = pcall(function() return plant:GetBoundingBox() end)
+   local by = (okb and cf) and (cf.Position.Y - size.Y / 2) or pv.Y
+   return Vector3.new(pv.X, by + 3, pv.Z), pv
+end
+
+local function flyToPlant(plant)
+   local target, pv = plantStandPos(plant)
+   local _, root = getChar()
+   if not root then return false end
+   local flat = Vector3.new(root.Position.X - pv.X, 0, root.Position.Z - pv.Z).Magnitude
+   if flat > 2.5 then
+      if root then root.CFrame = CFrame.new(target) end
+   end
+   return true
+end
+
+local function waterCan()
+   for _, t in ipairs(allTools()) do
+      local s = toolText(t)
+      if hasWord(s, WATER_TOOL_WORDS) and not hasWord(s, SEED_WORDS) and not isRubberTool(t) then
+         return t
+      end
+   end
+end
+
+local function canLevel(tool)
+   local a, b = tool.Name:match("(%d+)%s*/%s*(%d+)")
+   if a then return tonumber(a), tonumber(b) end
+   local cur, mx
+   for k, v in pairs(tool:GetAttributes()) do
+      if type(v) == "number" then
+         local kl = k:lower()
+         if hasWord(kl, MAX_KEYS) then
+            mx = mx or v
+         elseif hasWord(kl, {"water", "น้ำ", "fill", "amount", "level", "current", "uses"}) then
+            cur = cur or v
+         end
+      end
+   end
+   return cur, mx
+end
+
+local function waterRemotes(refill)
+   local list = {}
+   if Remotes then
+      for _, r in ipairs(Remotes:GetDescendants()) do
+         if r:IsA("RemoteEvent") then
+            local n = r.Name:lower()
+            if not hasWord(n, NOT_WATER) then
+               if refill then
+                  if hasWord(n, {"refill", "fill", "well", "pump", "เติม"}) then table.insert(list, r) end
+               else
+                  if n:find("water", 1, true) and not n:find("fill", 1, true) then table.insert(list, r) end
+               end
+            end
+         end
+      end
+   end
+   return list
+end
+
+local function feetPoint()
+   local _, root, hum = getChar()
+   if not root then return nil end
+   return root.Position - Vector3.new(0, hum.HipHeight + root.Size.Y / 2, 0)
+end
+
+local function useCanAtFeet(can)
+   local aimed = false
+   pcall(function()
+      local cam = workspace.CurrentCamera
+      local fp = feetPoint()
+      if not (cam and fp) then return end
+      local v, onScreen = cam:WorldToViewportPoint(fp)
+      if not onScreen then return end
+      VIM:SendMouseMoveEvent(v.X, v.Y, game)
+      task.wait(0.1)
+      VIM:SendMouseButtonEvent(v.X, v.Y, 0, true, game, 0)
+      task.wait(0.05)
+      VIM:SendMouseButtonEvent(v.X, v.Y, 0, false, game, 0)
+      aimed = true
+   end)
+   if not aimed then
+      pcall(function() can:Activate() end)
+   end
+end
+
+local function doWater(plant)
+   local can = waterCan()
+   if can then
+      equip(can)
+      useCanAtFeet(can)
+   end
+   for _, d in ipairs(plant:GetDescendants()) do
+      if d:IsA("ProximityPrompt") and d.Enabled then
+         local pt = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Name):lower()
+         if hasWord(pt, WATER_ACTION) and not hasWord(pt, RUBBER_ITEM_WORDS) then triggerPrompt(d) end
+      end
+   end
+   local _, pv = plantStandPos(plant)
+   local wr = Remotes and Remotes:FindFirstChild("Water")
+   if wr and wr:IsA("RemoteEvent") then
+      pcall(function() wr:FireServer("Water", pv) end)
+   else
+      for _, r in ipairs(waterRemotes(false)) do
+         pcall(function() r:FireServer(plant) end)
+         pcall(function() r:FireServer(plant, pv) end)
+      end
+   end
+   waterCount = waterCount + 1
+end
+
+local wellCache = {t = 0}
+local function findWell(force)
+   if wellCache.pos and not force and tick() - wellCache.t < 30 then
+      return wellCache.pos, wellCache.pr, wellCache.src
+   end
+   local _, root = getChar()
+   local best, bs, bd, bpr, bsrc
+   local function consider(pos, pr, score, src)
+      if not pos then return end
+      local d = root and (pos - root.Position).Magnitude or 0
+      if not bs or score > bs or (score == bs and d < bd) then
+         best, bs, bd, bpr, bsrc = pos, score, d, pr, src
+      end
+   end
+   for _, d in ipairs(workspace:GetDescendants()) do
+      if d:IsA("ProximityPrompt") then
+         local own = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Name):lower()
+         local blob = own .. " " .. ancestorText(d.Parent, 4)
+         if hasWord(blob, WELL_WORDS) and not hasWord(blob, SEED_WORDS) and not hasWord(blob, RUBBER_ITEM_WORDS)
+            and not classify(d) and not isVehicle(d) and not isNpc(d) then
+            local owner = ownerOf(d)
+            if not (owner and not amMine(d)) then
+               local part = promptPart(d)
+               if part then
+                  local score = hasWord(own, WELL_ACTION) and 3 or 2
+                  if amMine(d) then score = score + 1 end
+                  consider(part.Position, d, score, "พรอมต์ '" .. d.ActionText .. "' ที่ " .. (d.Parent and d.Parent.Name or "?"))
+               end
+            end
+         end
+      elseif d:IsA("Model") then
+         local nl = d.Name:lower()
+         if hasWord(nl, {"บ่อน้ำ", "well", "pump", "ปั๊มน้ำ"}) and not isNpc(d) and not isVehicle(d) then
+            consider(d:GetPivot().Position, nil, 1, "โมเดล " .. d.Name)
+         end
+      end
+   end
+   if best then wellCache = {pos = best, pr = bpr, src = bsrc, t = tick()} end
+   return best, bpr, bsrc
+end
+
+local function pressRefillButtons()
+   local pg = LocalPlayer:FindFirstChild("PlayerGui")
+   if not pg then return end
+   for _, b in ipairs(pg:GetDescendants()) do
+      if b:IsA("GuiButton") and not b:FindFirstAncestor("Rayfield") and isShown(b)
+         and b.AbsoluteSize.X > 0 and b.AbsoluteSize.Y > 0 then
+         if hasWord(buttonText(b), REFILL_BTN) then
+            pressButton(b)
+            task.wait(0.3)
+         end
+      end
+   end
+end
+
+local function doRefill()
+   local pos, pr = findWell(false)
+   if not pos then
+      note("เติมน้ำ", "ไม่พบบ่อน้ำ")
+      task.wait(2)
+      return false
+   end
+   local part = pr and promptPart(pr)
+   local tpos = part and part.Position or pos
+   local _, root = getChar()
+   if not root then return false end
+   if root then root.CFrame = CFrame.new(tpos + Vector3.new(0, 3, 0)) end
+   task.wait(0.3)
+   if pr and pr.Parent then triggerPrompt(pr) end
+   pressRefillButtons()
+   local can = waterCan()
+   if can then
+      equip(can)
+      pcall(function() can:Activate() end)
+   end
+   for _, r in ipairs(waterRemotes(true)) do
+      pcall(function() r:FireServer() end)
+   end
+   task.wait(0.5)
+   lastRefillT = tick()
+   return true
+end
+
+local function canEmpty()
+   local can = waterCan()
+   if can then
+      local cur = canLevel(can)
+      if cur ~= nil then return cur <= 0 end
+   end
+   if tick() - lastRefillT > 5 then
+      local pg = LocalPlayer:FindFirstChild("PlayerGui")
+      if pg then
+         for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text ~= "" and #d.Text < 60
+               and not d:FindFirstAncestor("Rayfield") and guiShown(d) then
+               if hasWord(d.Text:lower(), EMPTY_WORDS) then return true end
+            end
+         end
+      end
+   end
+   return waterCount >= S.waterPerRefill
+end
+
+local function waterRound(plant)
+   setWaterStatus("กำลังรดน้ำ: " .. plant.Name)
+   local pours, refilled = 0, false
+   while S.running and S.autoWater and not anySelling() and plant.Parent do
+      if canEmpty() then
+         setWaterStatus("น้ำหมด กำลังไปเติมน้ำ...")
+         if not doRefill() then
+            plantBlock[plant] = tick() + 20
+            return false
+         end
+         waterCount = 0
+         task.wait(S.refillGap)
+         setWaterStatus("กำลังรดน้ำ: " .. plant.Name)
+      end
+      flyToPlant(plant)
+      doWater(plant)
+      pours = pours + 1
+      task.wait(S.waterDelay)
+      if plantEval(plant) ~= true then break end
+      if pours == 3 and not refilled then
+         refilled = true
+         setWaterStatus("ต้นยังไม่หาย ลองเติมน้ำ...")
+         doRefill()
+         waterCount = 0
+         task.wait(S.refillGap)
+      elseif pours >= 8 then
+         plantBlock[plant] = tick() + 30
+         break
+      end
+   end
+   return true
+end
+
+task.spawn(function()
+   while S.running do
+      if S.autoWater and not anySelling() then
+         local targets = findThirsty()
+         if #targets == 0 then
+            setWaterStatus("เปิดอยู่ ไม่มีต้นที่ต้องการน้ำ")
+            task.wait(5)
+         else
+            waterWaiting = true
+            local t0 = tick()
+            while cycleBusy and tick() - t0 < 40 and S.autoWater and S.running do task.wait(0.1) end
+            waterWaiting = false
+            if S.autoWater and S.running and not anySelling() and not cycleBusy then
+               waterStepping = true
+               local okc, res = pcall(waterRound, targets[1].pl)
+               waterStepping = false
+               if not okc then
+                  warn("water error:", res)
+                  task.wait(1)
+               elseif res == false then
+                  task.wait(2)
+               end
+            end
+            task.wait(0.2)
+         end
+      else
+         task.wait(0.5)
+      end
+   end
+end)
+
+task.spawn(function()
+   while S.running do
+      if anySelling() or waterStepping then
+         task.wait(0.3)
+      else
+         cycleBusy = true
+         local okc, err = pcall(function()
+            if S.stealDurian then stealCycle("durian") end
+            if S.stealRubber then stealCycle("rubber") end
+            if S.farmDurian then harvestCycle("durian") end
+         end)
+         cycleBusy = false
+         if not okc then warn("loop error:", err) end
+         task.wait(0.5)
+      end
+   end
+end)
+
+task.spawn(function()
+   while S.running do
+      local ra = rubberAmount()
+      local txt = "🍈 " .. #fruitTools() .. " ผล    🧴 " .. (ra ~= nil and tostring(ra) or "?") .. " อัน    " ..
+         (isNight() and "🌙 กลางคืน" or "☀️ กลางวัน")
+      for _, c in ipairs(counters) do
+         pcall(function() c:Set({Title = "🎒 ของในตัว", Content = txt}) end)
+      end
+      task.wait(1)
+   end
+end)
+
+-- ==================== ดีไซน์หน้าต่าง UI (แบบดั้งเดิม: แถบเมนูด้านบน) ====================
+local W, H = 440, 310
+
+local root = mk("Frame", {
+   Name = "Root",
+   AnchorPoint = Vector2.new(0.5, 0.5),
+   Position = UDim2.new(0.5, 0, 0.5, 0),
+   Size = UDim2.new(0, W, 0, H),
+   BackgroundTransparency = 1,
+}, gui)
+local rootScale = mk("UIScale", {Scale = 0.01}, root)
+
+local glow = mk("Frame", {
+   AnchorPoint = Vector2.new(0.5, 0.5),
+   Position = UDim2.new(0.5, 0, 0.5, 0),
+   Size = UDim2.new(1, 16, 1, 16),
+   BackgroundColor3 = C.sky2,
+   BackgroundTransparency = 0.82,
+   ZIndex = 0,
+}, root)
+corner(glow, 28)
+
+local win = mk("Frame", {
+   Size = UDim2.new(1, 0, 1, 0),
+   BackgroundColor3 = C.white,
+   ClipsDescendants = true,
+   ZIndex = 1,
+}, root)
+corner(win, 20)
+mk("UIGradient", {Color = ColorSequence.new(C.white, C.mist), Rotation = 90}, win)
+local winStroke = mk("UIStroke", {Thickness = 2.5, Color = C.white}, win)
+local strokeGrad = mk("UIGradient", {
+   Color = ColorSequence.new({
+      ColorSequenceKeypoint.new(0, C.sky),
+      ColorSequenceKeypoint.new(0.5, C.white),
+      ColorSequenceKeypoint.new(1, C.sky2),
+   }),
+}, winStroke)
+
+-- แถบหัวข้อ
+local header = mk("Frame", {
+   Size = UDim2.new(1, 0, 0, 42),
+   BackgroundColor3 = C.white,
+   ZIndex = 3,
+   Active = true,
+   ClipsDescendants = true,
+}, win)
+mk("UIGradient", {
+   Color = ColorSequence.new(Color3.fromRGB(110, 202, 255), Color3.fromRGB(46, 132, 250)),
+   Rotation = 0,
+}, header)
+label({
+   Position = UDim2.new(0, 14, 0, 0), Size = UDim2.new(1, -70, 1, 0),
+   Text = "ทุเรียนสวนยาง | Auto Farm", Font = Enum.Font.GothamBlack, TextSize = 16,
+   TextColor3 = C.white, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+}, header)
+
+local minBtn = mk("TextButton", {
+   Position = UDim2.new(1, -38, 0.5, -13), Size = UDim2.new(0, 26, 0, 26),
+   BackgroundColor3 = C.white, BackgroundTransparency = 0.7, AutoButtonColor = false,
+   Text = "–", Font = Enum.Font.GothamBold, TextSize = 18, TextColor3 = C.white, ZIndex = 6,
+}, header)
+corner(minBtn, 13)
+
+-- แถบเลือกเมนูแนวด้านบน (เก็บ / ขโมย / ขาย / รดน้ำ) แบบดั้งเดิม
+local tabContainer = mk("Frame", {
+   Position = UDim2.new(0, 12, 0, 50), Size = UDim2.new(1, -24, 0, 36),
+   BackgroundColor3 = C.mist, ZIndex = 3,
+}, win)
+corner(tabContainer, 10)
+mk("UIListLayout", {
+   FillDirection = Enum.FillDirection.Horizontal,
+   HorizontalAlignment = Enum.HorizontalAlignment.Center,
+   SortOrder = Enum.SortOrder.LayoutOrder,
+   Padding = UDim.new(0, 4),
+}, tabContainer)
+
+local contentContainer = mk("Frame", {
+   Position = UDim2.new(0, 12, 0, 94), Size = UDim2.new(1, -24, 1, -104),
+   BackgroundTransparency = 1, ZIndex = 3,
+}, win)
+
+-- หน้าต่างย่อยแต่ละหมวด
+local pages = {}
+local function createPage(name)
+   local p = mk("ScrollingFrame", {
+      Size = UDim2.new(1, 0, 1, 0),
+      BackgroundTransparency = 1,
+      BorderSizePixel = 0,
+      ScrollBarThickness = 4,
+      ScrollBarImageColor3 = C.sky,
+      AutomaticCanvasSize = Enum.AutomaticSize.Y,
+      CanvasSize = UDim2.new(0, 0, 0, 0),
+      Visible = false,
+      ZIndex = 4,
+   }, contentContainer)
+   mk("UIListLayout", {
+      SortOrder = Enum.SortOrder.LayoutOrder,
+      Padding = UDim.new(0, 8),
+   }, p)
+   pages[name] = p
+   return p
+end
+
+local function createToggle(parent, title, default, callback)
+   local f = mk("Frame", {
+      Size = UDim2.new(1, 0, 0, 38),
+      BackgroundColor3 = C.white,
+      ZIndex = 5,
+   }, parent)
+   corner(f, 8)
+   mk("UIStroke", {Color = C.line, Thickness = 1}, f)
+   label({
+      Position = UDim2.new(0, 12, 0, 0), Size = UDim2.new(1, -70, 1, 0),
+      Text = title, TextSize = 12, TextColor3 = C.ink,
+      TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
+   }, f)
+   local btn = mk("TextButton", {
+      AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0),
+      Size = UDim2.new(0, 44, 0, 22), BackgroundColor3 = default and C.sky or C.gray,
+      AutoButtonColor = false, Text = "", ZIndex = 6,
+   }, f)
+   corner(btn, 11)
+   local circle = mk("Frame", {
+      AnchorPoint = Vector2.new(0, 0.5),
+      Position = default and UDim2.new(1, -20, 0.5, 0) or UDim2.new(0, 2, 0.5, 0),
+      Size = UDim2.new(0, 18, 0, 18), BackgroundColor3 = C.white, ZIndex = 7,
+   }, btn)
+   corner(circle, 9)
+
+   local state = default
+   btn.Activated:Connect(function()
+      state = not state
+      tw(btn, {BackgroundColor3 = state and C.sky or C.gray}, 0.2)
+      tw(circle, {Position = state and UDim2.new(1, -20, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)}, 0.2)
+      pcall(callback, state)
+   end)
+end
+
+local function createDropdown(parent, title, options, default, callback)
+   local f = mk("Frame", {
+      Size = UDim2.new(1, 0, 0, 38),
+      BackgroundColor3 = C.white,
+      ZIndex = 5,
+   }, parent)
+   corner(f, 8)
+   mk("UIStroke", {Color = C.line, Thickness = 1}, f)
+   label({
+      Position = UDim2.new(0, 12, 0, 0), Size = UDim2.new(1, -130, 1, 0),
+      Text = title, TextSize = 12, TextColor3 = C.ink,
+      TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
+   }, f)
+   local currentIdx = 1
+   for i, v in ipairs(options) do if v == default then currentIdx = i break end end
+   local btn = mk("TextButton", {
+      AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0),
+      Size = UDim2.new(0, 110, 0, 26), BackgroundColor3 = C.ice,
+      AutoButtonColor = false, Text = tostring(default),
+      Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.deep, ZIndex = 6,
+   }, f)
+   corner(btn, 6)
+   btn.Activated:Connect(function()
+      currentIdx = currentIdx % #options + 1
+      local val = options[currentIdx]
+      btn.Text = tostring(val)
+      pcall(callback, val)
+   end)
+end
+
+-- สร้างหน้าต่างแท็บต่างๆ
+local pHarvest = createPage("เก็บ")
+local pSteal = createPage("ขโมย")
+local pSell = createPage("ขาย")
+local pWater = createPage("รดน้ำ")
+
+-- ใส่ฟังก์ชันหน้า "เก็บ"
+createToggle(pHarvest, "🍈 เปิดระบบเก็บทุเรียนออโต้", false, function(v) S.farmDurian = v end)
+createToggle(pHarvest, "📍 วาร์ปไปเก็บที่ผลไม้ทันที", S.teleport, function(v) S.teleport = v end)
+createToggle(pHarvest, "↩️ กลับจุดเดิมหลังเก็บเสร็จ", S.returnHome, function(v) S.returnHome = v end)
+createDropdown(pHarvest, "📊 ลำดับการเก็บ", {"หนักสุดก่อน", "เบาสุดก่อน", "ใกล้สุดก่อน"}, S.sort, function(v) S.sort = v end)
+createDropdown(pHarvest, "⚖️ น้ำหนักขั้นต่ำ (Kg)", {0, 1, 2, 3, 5, 8, 10}, S.minW, function(v) S.minW = v end)
+createDropdown(pHarvest, "⚖️ น้ำหนักสูงสุด (Kg)", {0, 3, 5, 8, 10, 15, 20}, S.maxW, function(v) S.maxW = v end)
+createDropdown(pHarvest, "🏃 ความเร็วเดิน (WalkSpeed)", {16, 40, 60, 80, 110, 150, 200}, S.walkSpeed, function(v) S.walkSpeed = v end)
+
+-- ใส่ฟังก์ชันหน้า "ขโมย" (รวมฟังก์ชันวิ่งไว และ กระโดดไม่จำกัด)
+createToggle(pSteal, "🥷 ขโมยทุเรียนตอนกลางคืน", false, function(v) S.stealDurian = v end)
+createToggle(pSteal, "🥷 ขโมยขี้ยาง/น้ำยางออโต้", false, function(v) S.stealRubber = v end)
+createToggle(pSteal, "🦘 กระโดดไม่จำกัด (Infinite Jump)", false, function(v) S.infiniteJump = v end)
+
+-- ใส่ฟังก์ชันหน้า "ขาย"
+local btnSellD = mk("TextButton", {
+   Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = C.white, AutoButtonColor = false,
+   Text = "💰 กดขายทุเรียนทันที", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.deep, ZIndex = 5,
+}, pSell)
+corner(btnSellD, 8)
+mk("UIStroke", {Color = C.line, Thickness = 1}, btnSellD)
+btnSellD.Activated:Connect(function() startSell("durian") end)
+
+local btnSellR = mk("TextButton", {
+   Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = C.white, AutoButtonColor = false,
+   Text = "💰 กดขายขี้ยางทันที", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.deep, ZIndex = 5,
+}, pSell)
+corner(btnSellR, 8)
+mk("UIStroke", {Color = C.line, Thickness = 1}, btnSellR)
+btnSellR.Activated:Connect(function() startSell("rubber") end)
+
+-- ใส่ฟังก์ชันหน้า "รดน้ำ"
+createToggle(pWater, "💦 รดน้ำต้นไม้ออโต้", false, function(v)
+   S.autoWater = v
+   waterCount = 0
+   setWaterStatus(v and "เปิดอยู่ กำลังสแกนต้นไม้..." or "ปิดอยู่")
+end)
+
+-- ปุ่มสลับแท็บด้านบน
+local tabs = {"เก็บ", "ขโมย", "ขาย", "รดน้ำ"}
+local tabButtons = {}
+for i, name in ipairs(tabs) do
+   local tb = mk("TextButton", {
+      Size = UDim2.new(0.25, -3, 1, 0),
+      BackgroundColor3 = i == 1 and C.white or Color3.fromRGB(240, 245, 250),
+      AutoButtonColor = false, Text = name,
+      Font = Enum.Font.GothamBold, TextSize = 12,
+      TextColor3 = i == 1 and C.deep, ZIndex = 4,
+   }, tabContainer)
+   corner(tb, 8)
+   tabButtons[name] = tb
+
+   tb.Activated:Connect(function()
+       for n, p in pairs(pages) do p.Visible = (n == name) end
+       for n, b in pairs(tabButtons) do
+          b.BackgroundColor3 = (n == name) and C.white or Color3.fromRGB(240, 245, 250)
+          b.TextColor3 = (n == name) and C.deep
+       end
+   end)
+end
+pages["เก็บ"].Visible = true
+
+local dragState
+local function makeDraggable(handle, target)
+   handle.InputBegan:Connect(function(input)
+      if input.UserInputType == Enum.UserInputType.MouseButton1
+         or input.UserInputType == Enum.UserInputType.Touch then
+         dragState = {target = target, origin = input.Position, start = target.Position}
+         input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End
+               and dragState and dragState.target == target then
+               dragState = nil
+            end
+         end)
+      end
+   end)
+end
+makeDraggable(header, root)
+uisConn = UIS.InputChanged:Connect(function(input)
+   if dragState and (input.UserInputType == Enum.UserInputType.MouseMovement
+      or input.UserInputType == Enum.UserInputType.Touch) then
+      local d = input.Position - dragState.origin
+      local s = dragState.start
+      dragState.target.Position = UDim2.new(s.X.Scale, s.X.Offset + d.X, s.Y.Scale, s.Y.Offset + d.Y)
+   end
+end)
+
+local function calcScale()
+   local cam = workspace.CurrentCamera
+   local vp = cam and cam.ViewportSize or Vector2.new(800, 600)
+   return math.clamp(math.min((vp.Y - 24) / H, (vp.X - 16) / W, 1), 0.55, 1)
+end
+local baseScale = calcScale()
+local minimized = false
+
+local bubble = mk("TextButton", {
+   AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.new(0, 48, 0, 48),
+   Position = UDim2.new(0.5, 0, 0.5, 0), BackgroundColor3 = C.white,
+   AutoButtonColor = false, Text = "💧", TextSize = 24, Font = Enum.Font.GothamBold,
+   Visible = false, ZIndex = 10,
+}, gui)
+corner(bubble, 30)
+mk("UIStroke", {Color = C.sky, Thickness = 2.5}, bubble)
+mk("UIGradient", {Color = ColorSequence.new(C.white, C.mist), Rotation = 90}, bubble)
+local bScale = mk("UIScale", {Scale = 0}, bubble)
+
+minBtn.Activated:Connect(function()
+   if minimized then return end
+   minimized = true
+   tw(rootScale, {Scale = 0.01}, 0.22, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+   task.delay(0.22, function() if minimized then root.Visible = false end end)
+   bubble.Visible = true
+   bScale.Scale = 0
+   tw(bScale, {Scale = 1}, 0.3, Enum.EasingStyle.Back)
+end)
+bubble.Activated:Connect(function()
+   if not minimized then return end
+   minimized = false
+   tw(bScale, {Scale = 0}, 0.15)
+   task.delay(0.15, function() if not minimized then bubble.Visible = false end end)
+   root.Visible = true
+   tw(rootScale, {Scale = baseScale}, 0.35, Enum.EasingStyle.Back)
+end)
+
+hbConn = RunService.Heartbeat:Connect(function(dt)
+   local t = tick()
+   strokeGrad.Rotation = (t * 70) % 360
+end)
+
+task.delay(0.1, function()
+   tw(rootScale, {Scale = baseScale}, 0.5, Enum.EasingStyle.Back)
+end)
+note("blox × สวนย่าง", "เพิ่มระบบวิ่งไวและกระโดดไม่จำกัดแล้ว ✨")
